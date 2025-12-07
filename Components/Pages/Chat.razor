@@ -1,0 +1,184 @@
+﻿@page "/"
+@rendermode InteractiveServer
+@inject ClientWebChat.Services.ChatService ChatService
+
+<PageTitle>Chat</PageTitle>
+
+<h2>Simple WebSocket Chat</h2>
+
+@if (!connected)
+{
+    <div class="mb-3">
+        <label class="form-label">Username</label>
+        <input class="form-control" @bind="username" @bind:event="oninput" />
+    </div>
+    <div class="mb-3">
+        <label class="form-label">WebSocket Server URL</label>
+        <input class="form-control" @bind="serverUrl" />
+    </div>
+
+    <button class="btn btn-primary" @onclick="Connect">
+        Connect
+    </button>
+
+    @if (connectError != null)
+    {
+        <div class="alert alert-danger mt-3">@connectError</div>
+    }
+}
+else
+{
+    <div class="mb-2">
+        <strong>Connected as:</strong> @username
+        <button class="btn btn-sm btn-danger float-end" @onclick="Disconnect">Disconnect</button>
+    </div>
+
+    <div style="height: 320px; overflow-y: auto; border: 1px solid #ccc; padding: 8px;" @ref="messagesContainer">
+        @foreach (var m in messages)
+        {
+            <div><strong>@m.User:</strong> @m.Text</div>
+        }
+    </div>
+
+    <div class="input-group mt-2">
+        <input class="form-control" placeholder="Type a message..." @bind="outgoing" @onkeydown="HandleKeyDown" />
+        <button class="btn btn-primary" @onclick="Send">Send</button>
+    </div>
+}
+
+@code {
+    private string username = string.Empty;
+    private string serverUrl = "ws://localhost:1050/ws";
+    private bool connected = false;
+    private string? connectError;
+    private string outgoing = string.Empty;
+
+    private readonly List<MessageEntry> messages = new();
+    private ElementReference messagesContainer;
+
+    protected override void OnInitialized()
+    {
+        ChatService.MessageReceived += OnMessageReceivedFromService;
+        ChatService.ConnectionClosed += OnConnectionClosed;
+    }
+
+    private async Task Connect()
+    {
+        connectError = null;
+        try
+        {
+            await ChatService.ConnectAsync(new Uri(serverUrl), username, CancellationToken.None);
+            connected = true;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            connectError = $"Connection failed: {ex.Message}";
+        }
+    }
+
+    private async Task Disconnect()
+    {
+        await ChatService.DisconnectAsync();
+        connected = false;
+        StateHasChanged();
+    }
+
+    private async Task Send()
+    {
+        var text = outgoing?.Trim();
+        if (string.IsNullOrEmpty(text)) return;
+
+        await ChatService.SendMessageAsync(text);
+        outgoing = string.Empty;
+
+        // Optionally add local echo immediately (server will broadcast too)
+        // messages.Add(new MessageEntry{ User = username, Text = text }); 
+        // await ScrollToBottom();
+    }
+
+    private void OnMessageReceivedFromService(string raw)
+    {
+        // Assume incoming is JSON with { user, text } or plain text.
+        // Try simple parse; be defensive.
+        try
+        {
+            IncomingDto? dto = System.Text.Json.JsonSerializer.Deserialize<IncomingDto>(raw);
+            if (dto != null)
+            {
+                messages.Add(new MessageEntry { User = dto.user ?? "?", Text = dto.text ?? raw });
+            }
+            else
+            {
+                messages.Add(new MessageEntry { User = "server", Text = raw });
+            }
+        }
+        catch
+        {
+            messages.Add(new MessageEntry { User = "server", Text = raw });
+        }
+
+        // UI thread refresh
+        _ = InvokeAsync(async () =>
+        {
+            StateHasChanged();
+            await ScrollToBottom();
+        });
+    }
+
+    private void OnConnectionClosed()
+    {
+        _ = InvokeAsync(() =>
+        {
+            connected = false;
+            StateHasChanged();
+        });
+    }
+
+    private async Task ScrollToBottom()
+    {
+        try
+        {
+            await Task.Delay(10); // allow render
+            await JSRuntimeInvokeScrollToBottom();
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
+    // small JS interop to scroll the messages container (keeps UI pleasant)
+    [Inject] private IJSRuntime JS { get; set; } = default!;
+
+    private async Task JSRuntimeInvokeScrollToBottom()
+    {
+        await JS.InvokeVoidAsync("blazorChat.scrollToBottom", messagesContainer);
+    }
+
+    private void HandleKeyDown(KeyboardEventArgs args)
+    {
+        if (args.Key == "Enter")
+        {
+            _ = Send();
+        }
+    }
+
+    public void Dispose()
+    {
+        ChatService.MessageReceived -= OnMessageReceivedFromService;
+        ChatService.ConnectionClosed -= OnConnectionClosed;
+    }
+
+    private class MessageEntry
+    {
+        public string User { get; set; } = string.Empty;
+        public string Text { get; set; } = string.Empty;
+    }
+
+    private class IncomingDto
+    {
+        public string? user { get; set; }
+        public string? text { get; set; }
+    }
+}
